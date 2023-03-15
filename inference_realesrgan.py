@@ -2,8 +2,10 @@ import argparse
 import cv2
 import glob
 import os
+import torch
 from basicsr.archs.rrdbnet_arch import RRDBNet
 from basicsr.utils.download_util import load_file_from_url
+import time
 
 from realesrgan import RealESRGANer
 from realesrgan.archs.srvgg_arch import SRVGGNetCompact
@@ -160,6 +162,13 @@ def main():
             else:
                 save_path = os.path.join(args.output, f'{imgname}_{args.suffix}.{extension}')
             cv2.imwrite(save_path, output)
+
+        # inference trt model
+        try:
+            print('Testing trt', idx, imgname)
+            output, _ = upsampler.enhance(img, outscale=args.outscale, use_trt=True)
+        except RuntimeError as error:
+            print('Error', error)
 
 
 if __name__ == '__main__':

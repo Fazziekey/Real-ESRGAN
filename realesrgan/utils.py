@@ -6,6 +6,8 @@ import queue
 import threading
 import torch
 from basicsr.utils.download_util import load_file_from_url
+import time
+from torch2trt import torch2trt
 from torch.nn import functional as F
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -73,6 +75,8 @@ class RealESRGANer():
         self.model = model.to(self.device)
         if self.half:
             self.model = self.model.half()
+        
+        self.trt_model = None
 
     def dni(self, net_a, net_b, dni_weight, key='params', loc='cpu'):
         """Deep network interpolation.
@@ -110,9 +114,43 @@ class RealESRGANer():
                 self.mod_pad_w = (self.mod_scale - w % self.mod_scale)
             self.img = F.pad(self.img, (0, self.mod_pad_w, 0, self.mod_pad_h), 'reflect')
 
-    def process(self):
+    def convert_2_trt(self, img):
+        """Convert the model to TensorRT model.
+        """
+        if self.trt_model is None:
+            self.trt_model = torch2trt(self.model, [img], fp16_mode=self.half)
+        return self.trt_model
+
+    def process_trt_model(self, times = 10):
+        """Process the TensorRT model.
+        """
+        print('Converting to TensorRT model...')
+        start_time = time.time()
+        self.convert_2_trt(self.img)
+        print('Convert to TensorRT model cost: {:.4f}s'.format(time.time() - start_time))
+
         # model inference
-        self.output = self.model(self.img)
+        print('Processing TensorRT model...')
+        
+        total_times = 0
+        for i in range(times):
+            start_time = time.time()
+            self.output = self.trt_model(self.img)
+            print('Process cost for: {:.4f}s'.format(time.time() - start_time))
+            if i > 5:
+                total_times += time.time() - start_time
+        print('Process average cost: {:.4f}s'.format(total_times / (times - 5)))
+
+    def process(self, times = 10):
+        # model inference
+        total_time = 0
+        for i in range(times):
+            start_time = time.time()
+            self.output = self.model(self.img)
+            print('Process cost: {:.4f}s'.format(time.time() - start_time))
+            if i > 5:
+                total_time += time.time() - start_time
+        print('Process average cost: {:.4f}s'.format(total_time / (times - 5)))
 
     def tile_process(self):
         """It will first crop input images to tiles, and then process each tile.
@@ -191,7 +229,7 @@ class RealESRGANer():
         return self.output
 
     @torch.no_grad()
-    def enhance(self, img, outscale=None, alpha_upsampler='realesrgan'):
+    def enhance(self, img, outscale=None, alpha_upsampler='realesrgan', use_trt=False):
         h_input, w_input = img.shape[0:2]
         # img: numpy
         img = img.astype(np.float32)
@@ -217,10 +255,13 @@ class RealESRGANer():
 
         # ------------------- process image (without the alpha channel) ------------------- #
         self.pre_process(img)
-        if self.tile_size > 0:
-            self.tile_process()
+        if use_trt:
+            self.process_trt_model()
         else:
-            self.process()
+            if self.tile_size > 0:
+                self.tile_process()
+            else:
+                self.process()
         output_img = self.post_process()
         output_img = output_img.data.squeeze().float().cpu().clamp_(0, 1).numpy()
         output_img = np.transpose(output_img[[2, 1, 0], :, :], (1, 2, 0))
